@@ -73,7 +73,6 @@ int main()
 
 	std::ifstream file;
 	std::stringstream buffer;
-	std::cout << std::filesystem::current_path();
 	file.open("token.txt", std::ios::in | std::ios::binary);
 	if (file.is_open()) {
 		buffer << file.rdbuf();
@@ -118,17 +117,26 @@ int main()
 	/* Handle slash command with the most recent addition to D++ features, coroutines! */
 	bot.on_slashcommand([&bot](const dpp::slashcommand_t& event) -> dpp::task<void> {
 		if (event.command.get_command_name() == "ping") {
-			event.reply("Pong!");
+			event.reply(":ping_pong: Pong!");
 		}
 		else if (event.command.get_command_name() == "join") {
 			/* Get the guild */
 			dpp::guild* g = dpp::find_guild(event.command.guild_id);
 
 			/* Attempt to connect to a voice channel, returns false if we fail to connect. */
-			if (!g->connect_member_voice(event.command.get_issuing_user().id)) {
+			dpp::voiceconn* v = event.from->get_voice(event.command.guild_id);
+			if (g->voice_members.contains(event.command.get_issuing_user().id)) {
+				if (v && v->voiceclient && v->voiceclient->is_ready() && g->voice_members[event.command.get_issuing_user().id].channel_id == v->channel_id) {
+					event.reply("Already in the same voice channel as you!");
+					co_return;
+				};
+			}
+			if (!g->connect_member_voice(event.command.get_issuing_user().id, false, true)) {
 				event.reply("You don't seem to be in a voice channel!");
 				co_return;
 			}
+
+			guildStatuses[event.command.guild_id] = GuildStatus();
 
 			/* Tell the user we joined their channel. */
 			event.reply("Joined your channel!");
@@ -177,7 +185,7 @@ int main()
 			}
 			bool loop = std::get<bool>(event.get_parameter("toggle"));
 			guildStatuses[event.command.guild_id].loop = loop;
-			event.reply(loop ? "Toggled looping on" : "Toggled looping off");
+			event.reply(loop ? ":repeat: Toggled looping on" : ":repeat: Toggled looping off");
 		}
 		else if (event.command.get_command_name() == "queue") {
 			dpp::voiceconn* v = event.from->get_voice(event.command.guild_id);
@@ -190,11 +198,11 @@ int main()
 			std::string list = "";
 
 			for (int i = 0; i < guildStatuses[event.command.guild_id].queue.size(); i++) {
-				list += (std::to_string(i) + ": `" + guildStatuses[event.command.guild_id].queue.front().name + "`\n");
+				list += (std::to_string(i+1) + ": `" + guildStatuses[event.command.guild_id].queue.front().name + "`\n");
 				guildStatuses[event.command.guild_id].queue.push(guildStatuses[event.command.guild_id].queue.front());
 				guildStatuses[event.command.guild_id].queue.pop();
 			}
-			event.reply("This is the current queue:\n" + list);
+			event.reply("Currently playing: `" + guildStatuses[event.command.guild_id].current.name + "`\nThis is the current queue:\n" + list);
 		}
 		else if (event.command.get_command_name() == "mp3") {
 			dpp::voiceconn* v = event.from->get_voice(event.command.guild_id);
@@ -234,9 +242,37 @@ int main()
 		// download mpeg-2 file from attachment url
 		dpp::http_request_completion_t http = co_await bot.co_request(s.current.url, dpp::m_get);
 		std::vector<uint8_t> mp3Data(http.body.begin(), http.body.end());
-		std::vector<uint8_t> pcmData = MP3toPCM(mp3Data);
-		sendMusic(vc, pcmData);
+		std::vector<uint8_t> pcmData;
+		try {
+			pcmData = MP3toPCM(mp3Data);
+		}
+		catch (std::runtime_error& e) {
+			bot.log(dpp::ll_info, e.what());
+		}
+		if(!pcmData.empty()) {
+			sendMusic(vc, pcmData);
+		}
+		else {
+			for (int i = 0; i < s.queue.size(); i++) {
+				if (s.queue.front().url != s.current.url) {
+					s.queue.push(s.queue.front());
+				}
+				s.queue.pop();
+			}
+			vc->send_silence(60);
+			vc->insert_marker();
+		}
+		co_return;
 	});
+
+	/*bot.on_voice_client_disconnect([&bot](const dpp::voice_client_disconnect_t& event)->dpp::task<void> {
+		// disconnect from empty channel to save bandwidth and processing power
+		if (dpp::find_channel(event.voice_client->channel_id)->get_voice_members().size() == 1) {
+
+			event.voice_client->close();
+		}
+		co_return;
+	});*/
 
 	/* Start the bot */
 	bot.start(dpp::st_wait);
